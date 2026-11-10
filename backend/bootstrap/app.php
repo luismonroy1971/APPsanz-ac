@@ -20,6 +20,8 @@ return Application::configure(basePath: dirname(__DIR__))
             'internal' => \App\Http\Middleware\EnsureInternal::class,
             'client.can' => \App\Http\Middleware\ClientPermission::class,
         ]);
+        // API sin sesión: responder 401 JSON en lugar de redirigir a una ruta "login" (la SPA tiene su propio login)
+        $middleware->redirectGuestsTo(fn (Request $request) => $request->is('api/*') ? null : '/login');
     })
     ->withExceptions(function (Exceptions $exceptions) {
         // La API siempre responde JSON
