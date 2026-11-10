@@ -1,0 +1,48 @@
+# APPsanz&ac - Hostinger (todo en un dominio)
+Options -Indexes -MultiViews
+
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+
+    # Forzar HTTPS
+    RewriteCond %{HTTPS} !=on
+    RewriteCond %{HTTP:X-Forwarded-Proto} !=https
+    RewriteRule ^ https://%{HTTP_HOST}%{REQUEST_URI} [L,R=301]
+
+    # Pasar el token Bearer a PHP
+    RewriteCond %{HTTP:Authorization} .
+    RewriteRule .* - [E=HTTP_AUTHORIZATION:%{HTTP:Authorization}]
+
+    # API Laravel: /api/* y chequeo de salud /up
+    RewriteCond %{REQUEST_URI} ^/api(/|$) [OR]
+    RewriteCond %{REQUEST_URI} ^/up$
+    RewriteRule ^ laravel.php [L]
+
+    # Archivos reales (assets, favicon, .well-known)
+    RewriteCond %{REQUEST_FILENAME} -f [OR]
+    RewriteCond %{REQUEST_FILENAME} -d
+    RewriteRule ^ - [L]
+
+    # Rutas del frontend (React Router)
+    RewriteRule ^ index.html [L]
+</IfModule>
+
+# Caché larga para assets con hash; index.html sin caché
+<IfModule mod_headers.c>
+    <FilesMatch "\.(js|css|woff2?|svg|png|jpg|webp)$">
+        Header set Cache-Control "public, max-age=31536000, immutable"
+    </FilesMatch>
+    <FilesMatch "index\.html$">
+        Header set Cache-Control "no-cache, no-store, must-revalidate"
+    </FilesMatch>
+    Header always set X-Content-Type-Options "nosniff"
+    Header always set X-Frame-Options "SAMEORIGIN"
+    Header always set Referrer-Policy "strict-origin-when-cross-origin"
+</IfModule>
+
+# Subida de documentos (máx. 20 MB por archivo, varios por envío)
+<IfModule mod_php.c>
+    php_value upload_max_filesize 25M
+    php_value post_max_size 120M
+    php_value max_execution_time 120
+</IfModule>

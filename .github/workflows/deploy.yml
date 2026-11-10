@@ -1,0 +1,199 @@
+name: CI y despliegue a Hostinger
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - 'docs/**'
+      - 'tools/**'
+      - '**.md'
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+env:
+  PHP_VERSION: '8.4'
+  NODE_VERSION: '20'
+
+jobs:
+  test:
+    name: Pruebas (backend + frontend)
+    runs-on: ubuntu-latest
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ALLOW_EMPTY_PASSWORD: 'yes'
+          MYSQL_DATABASE: appsanzac_test
+        ports: ['3306:3306']
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1"
+          --health-interval=10s --health-timeout=5s --health-retries=10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ env.PHP_VERSION }}
+          extensions: mbstring, intl, gd, zip, pdo_mysql, fileinfo, dom
+          coverage: none
+
+      - name: Dependencias backend
+        working-directory: backend
+        run: composer install --no-interaction --prefer-dist --no-progress
+
+      - name: Tests backend
+        working-directory: backend
+        run: |
+          cp .env.example .env
+          php artisan key:generate
+          php artisan test
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Lint y build frontend
+        working-directory: frontend
+        run: |
+          npm ci
+          npx eslint src
+          npm run build
+
+  deploy:
+    name: Desplegar en Hostinger
+    needs: test
+    runs-on: ubuntu-latest
+    environment: production
+    env:
+      APP_DOMAIN: ${{ vars.APP_DOMAIN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verificar configuración
+        run: |
+          missing=""
+          for v in APP_DOMAIN SSH_HOST SSH_PORT SSH_USER SSH_PRIVATE_KEY DB_DATABASE DB_USERNAME DB_PASSWORD; do
+            [ -n "${!v}" ] || missing="$missing $v"
+          done
+          if [ -n "$missing" ]; then echo "::error::Faltan variables/secretos:$missing"; exit 1; fi
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_PORT: ${{ secrets.SSH_PORT }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          DB_DATABASE: ${{ secrets.DB_DATABASE }}
+          DB_USERNAME: ${{ secrets.DB_USERNAME }}
+          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ env.PHP_VERSION }}
+          extensions: mbstring, intl, gd, zip, pdo_mysql, fileinfo, dom
+          coverage: none
+
+      - name: Empaquetar backend (sin dependencias de desarrollo)
+        working-directory: backend
+        run: |
+          composer install --no-dev --optimize-autoloader --no-interaction --prefer-dist --no-progress
+          tar -czf ../backend.tar.gz --exclude='bootstrap/cache/*.php' \
+            app bootstrap config database resources routes vendor public artisan composer.json composer.lock
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Empaquetar frontend
+        working-directory: frontend
+        env:
+          VITE_API_URL: /api/v1
+        run: |
+          npm ci
+          npm run build
+          cp ../deploy/hostinger/.htaccess ../deploy/hostinger/laravel.php dist/
+          tar -czf ../frontend.tar.gz -C dist .
+
+      - name: Generar .env de producción
+        env:
+          DB_DATABASE: ${{ secrets.DB_DATABASE }}
+          DB_USERNAME: ${{ secrets.DB_USERNAME }}
+          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+          DB_HOST: ${{ vars.DB_HOST || 'localhost' }}
+          SEED_DEMO: ${{ vars.SEED_DEMO || 'false' }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          MAIL_FROM: ${{ vars.MAIL_FROM_ADDRESS || 'no-reply@example.com' }}
+        run: |
+          AI_ENABLED=false; [ -n "$ANTHROPIC_API_KEY" ] && AI_ENABLED=true
+          cat > .env.production <<EOF
+          APP_NAME="APPsanz&ac"
+          APP_ENV=production
+          APP_KEY=
+          APP_DEBUG=false
+          APP_URL=https://${APP_DOMAIN}
+          FRONTEND_URL=https://${APP_DOMAIN}
+          CORS_ALLOWED_ORIGINS=https://${APP_DOMAIN},https://www.${APP_DOMAIN}
+          APP_LOCALE=es
+          APP_FALLBACK_LOCALE=en
+          APP_FAKER_LOCALE=es_PE
+          APP_MAINTENANCE_DRIVER=file
+          BCRYPT_ROUNDS=12
+          LOG_CHANNEL=daily
+          LOG_LEVEL=warning
+          DB_CONNECTION=mysql
+          DB_HOST=${DB_HOST}
+          DB_PORT=3306
+          DB_DATABASE=${DB_DATABASE}
+          DB_USERNAME=${DB_USERNAME}
+          DB_PASSWORD="${DB_PASSWORD}"
+          SESSION_DRIVER=file
+          CACHE_STORE=file
+          QUEUE_CONNECTION=sync
+          FILESYSTEM_DISK=local
+          MAIL_MAILER=log
+          MAIL_FROM_ADDRESS=${MAIL_FROM}
+          MAIL_FROM_NAME="APPsanz&ac"
+          AI_EXTRACTION_ENABLED=${AI_ENABLED}
+          ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+          ANTHROPIC_MODEL=claude-opus-5-5
+          SEED_DEMO=${SEED_DEMO}
+          EOF
+          sed -i 's/^ *//' .env.production
+
+      - name: Configurar SSH
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_PORT: ${{ secrets.SSH_PORT }}
+        run: |
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/id_deploy && chmod 600 ~/.ssh/id_deploy
+          ssh-keyscan -p "$SSH_PORT" -H "$SSH_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Subir y ejecutar despliegue
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_PORT: ${{ secrets.SSH_PORT }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+          PHP_BIN: ${{ vars.PHP_BIN || '/opt/alt/php84/usr/bin/php' }}
+        run: |
+          SSH="ssh -i ~/.ssh/id_deploy -p $SSH_PORT -o StrictHostKeyChecking=yes"
+          TARGET="domains/$APP_DOMAIN"
+          $SSH "$SSH_USER@$SSH_HOST" "mkdir -p ~/$TARGET"
+          scp -i ~/.ssh/id_deploy -P "$SSH_PORT" backend.tar.gz frontend.tar.gz .env.production deploy/hostinger/remote-deploy.sh "$SSH_USER@$SSH_HOST:~/$TARGET/"
+          $SSH "$SSH_USER@$SSH_HOST" "APP_DOMAIN='$APP_DOMAIN' PHP_BIN='$PHP_BIN' bash ~/$TARGET/remote-deploy.sh && rm -f ~/$TARGET/remote-deploy.sh"
+
+      - name: Verificar sitio
+        run: |
+          sleep 5
+          curl -fsS "https://$APP_DOMAIN/up" > /dev/null && echo "API OK"
+          curl -fsS "https://$APP_DOMAIN/" | grep -q 'APPsanz' && echo "Frontend OK"
+
+      - name: Limpiar
+        if: always()
+        run: rm -f ~/.ssh/id_deploy .env.production

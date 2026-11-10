@@ -8,6 +8,7 @@
     "record": "node record.mjs"
   },
   "dependencies": {
+    "ffmpeg-static": "^5.2.0",
     "playwright-core": "1.56.1"
   }
 }

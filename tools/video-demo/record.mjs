@@ -8,12 +8,20 @@
  *   npm run record                   # graba todos los perfiles
  *   node record.mjs cliente socio    # graba perfiles específicos
  *
- * Los videos (.webm) quedan en docs/videos/.
+ * Los videos (.mp4, H.264 + narración AAC) quedan en docs/videos/.
+ * La narración usa la voz en español de Windows (por defecto «Microsoft Sabina Desktop», configurable con TTS_VOICE)
+ * y se mezcla con ffmpeg (paquete ffmpeg-static).
  */
 import { chromium } from 'playwright-core'
+import { spawn, execFileSync } from 'node:child_process'
+import { createRequire } from 'node:module'
+import readline from 'node:readline'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+
+const require = createRequire(import.meta.url)
+const FFMPEG = require('ffmpeg-static')
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 const ROOT = path.resolve(here, '../..')
@@ -29,6 +37,90 @@ fs.mkdirSync(OUT, { recursive: true })
 /* ------------------------------------------------------------------ utilidades */
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+
+/* ------------------------------------------------------------------ narración (TTS) */
+
+const AUDIO_TMP = path.join(here, '.tmp', 'audio')
+fs.mkdirSync(AUDIO_TMP, { recursive: true })
+
+/** Adapta el texto de los subtítulos para que la voz lo lea de forma natural. */
+function speakable(text) {
+  return String(text)
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/R(\d+)\s*[–-]\s*R(\d+)/g, 'R$1 a R$2')
+    .replace(/\s*→\s*/g, ', luego ')
+    .replace(/\bS\/\s?/g, 'soles ')
+    .replace(/\bSANZ & AC\b/g, 'Sanz y A C')
+    .replace(/APPsanz&ac/g, 'App Sanz y A C')
+    .replace(/\bBD\.(\d)/g, 'base de datos $1')
+    .replace(/\bEEFF\b/g, 'estados financieros')
+    .replace(/\bIGV\b/g, 'I G V')
+    .replace(/\bRUC\b/g, 'R U C')
+    .replace(/\bPLE\b/g, 'P L E')
+    .replace(/\bXML\b/g, 'X M L')
+    .replace(/\bPDF\b/g, 'P D F')
+    .replace(/\bRRHH\b/g, 'recursos humanos')
+    .replace(/\bS(\d)\b/g, 'S $1')
+    .replace(/\bC(\d)\b/g, 'C $1')
+    .replace(/\(([^)]*)\)/g, ', $1,')
+    .replace(/[«»"]/g, '')
+    .replace(/·/g, ',')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+class Narrator {
+  constructor() {
+    this.queue = []
+    this.n = 0
+    this.proc = spawn('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', path.join(here, 'tts-server.ps1'),
+      '-Voice', process.env.TTS_VOICE ?? 'Microsoft Sabina Desktop', '-Rate', process.env.TTS_RATE ?? '1'], { stdio: ['pipe', 'pipe', 'inherit'] })
+    this.proc.stdin.setDefaultEncoding('utf8')
+    const rl = readline.createInterface({ input: this.proc.stdout })
+    this.ready = new Promise((resolve) => {
+      rl.on('line', (line) => {
+        if (line.startsWith('READY')) {
+          console.log(`  voz: ${line.slice(6)}`)
+          return resolve()
+        }
+        const cb = this.queue.shift()
+        cb?.(line)
+      })
+    })
+  }
+
+  /** Genera el WAV y devuelve su ruta y duración en ms. */
+  async synth(text) {
+    await this.ready
+    const out = path.join(AUDIO_TMP, `n${String(++this.n).padStart(4, '0')}.wav`)
+    const res = await new Promise((resolve) => {
+      this.queue.push(resolve)
+      this.proc.stdin.write(JSON.stringify({ text: speakable(text), out }) + '\n')
+    })
+    if (!res.startsWith('OK')) throw new Error(`TTS: ${res}`)
+    const buf = fs.readFileSync(out)
+    const byteRate = buf.readUInt32LE(28)
+    return { file: out, ms: Math.round(((buf.length - 44) / byteRate) * 1000) }
+  }
+
+  close() {
+    this.proc.stdin.end()
+  }
+}
+
+/** Mezcla los clips de narración en su instante y exporta MP4 (H.264 + AAC). */
+function muxNarration(videoPath, clips, target) {
+  const args = ['-hide_banner', '-loglevel', 'error', '-y', '-i', videoPath]
+  clips.forEach((c) => args.push('-i', c.file))
+  const filters = clips.map((c, i) => `[${i + 1}:a]aresample=48000,adelay=${c.at}|${c.at}[a${i}]`)
+  const mix = clips.length
+    ? `${clips.map((_, i) => `[a${i}]`).join('')}amix=inputs=${clips.length}:normalize=0:dropout_transition=0,volume=1.25,alimiter=limit=0.9,apad[aout]`
+    : 'anullsrc=r=48000:cl=mono[aout]'
+  args.push('-filter_complex', [...filters, mix].join(';'), '-map', '0:v', '-map', '[aout]',
+    '-c:v', 'libx264', '-preset', 'medium', '-crf', '24', '-pix_fmt', 'yuv420p', '-r', '25',
+    '-c:a', 'aac', '-b:a', '128k', '-ac', '1', '-movflags', '+faststart', '-shortest', target)
+  execFileSync(FFMPEG, args, { stdio: 'inherit', maxBuffer: 1 << 26 })
+}
 
 /** RUC con dígito verificador (para datos de ejemplo válidos). */
 function ruc(base10) {
@@ -78,15 +170,28 @@ const OVERLAY = () => {
 }
 
 class Demo {
-  constructor(page, name) {
+  constructor(page, name, narrator, t0) {
     this.page = page
     this.name = name
     this.failures = []
+    this.narrator = narrator
+    this.t0 = t0
+    this.clips = []
   }
 
+  /** Reproduce (registra) una narración y devuelve su duración. */
+  async say(text) {
+    if (!this.narrator || !text) return 0
+    const clip = await this.narrator.synth(text)
+    this.clips.push({ file: clip.file, at: Math.max(0, Date.now() - this.t0) })
+    return clip.ms
+  }
+
+  /** Muestra el subtítulo, lo narra y espera a que termine la narración. */
   async caption(tag, title, text, wait = 3500) {
     await this.page.evaluate(([a, b, c]) => window.__setCaption?.(a, b, c), [tag, title, text]).catch(() => {})
-    await sleep(wait)
+    const ms = await this.say(`${title}. ${text ?? ''}`)
+    await sleep(Math.max(wait, ms + 700))
   }
 
   async hideCaption() {
@@ -191,7 +296,9 @@ class Demo {
       <h1>${title}</h1><h2>${subtitle}</h2><ul>${bullets.map((b) => `<li>${b}</li>`).join('')}</ul>
     </div></body></html>`
     await this.page.setContent(html)
-    await sleep(6500)
+    await sleep(600)
+    const ms = await this.say(`${title}. ${subtitle}. ${bullets.join('. ')}.`)
+    await sleep(Math.max(6000, ms + 900))
   }
 
   async login(email, portal) {
@@ -664,6 +771,7 @@ const ORDER = ['cliente', 'cliente-limitado', 'analista', 'supervisor', 'socio']
 const wanted = process.argv.slice(2).length ? process.argv.slice(2) : ORDER
 
 const browser = await chromium.launch({ channel: CHANNEL, headless: true })
+const narrator = process.env.NO_AUDIO ? null : new Narrator()
 const summary = []
 for (const [i, name] of ORDER.entries()) {
   if (!wanted.includes(name)) continue
@@ -676,8 +784,9 @@ for (const [i, name] of ORDER.entries()) {
   })
   await context.addInitScript(OVERLAY)
   const page = await context.newPage()
-  const demo = new Demo(page, name)
+  // La grabación comienza al crear la página: t0 alinea la narración con el video
   const t0 = Date.now()
+  const demo = new Demo(page, name, narrator, t0)
   try {
     await SCRIPTS[name](demo)
     await demo.hideCaption()
@@ -687,13 +796,15 @@ for (const [i, name] of ORDER.entries()) {
   }
   const video = page.video()
   await context.close()
-  const target = path.join(OUT, `${String(i + 1).padStart(2, '0')}-perfil-${name}.webm`)
+  const target = path.join(OUT, `${String(i + 1).padStart(2, '0')}-perfil-${name}.mp4`)
   if (video) {
-    fs.copyFileSync(await video.path(), target)
+    console.log(`  mezclando narración (${demo.clips.length} clips)...`)
+    muxNarration(await video.path(), demo.clips, target)
   }
   const secs = Math.round((Date.now() - t0) / 1000)
   summary.push({ perfil: name, video: path.relative(ROOT, target), duracion_aprox: `${Math.floor(secs / 60)}m ${secs % 60}s`, pasos_con_error: demo.failures })
 }
 await browser.close()
+narrator?.close()
 fs.rmSync(path.join(here, '.tmp'), { recursive: true, force: true })
 console.log(JSON.stringify(summary, null, 2))
