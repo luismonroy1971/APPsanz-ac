@@ -1,0 +1,13 @@
+{
+  "name": "appsanzac-video-demo",
+  "private": true,
+  "type": "module",
+  "description": "Graba videos demostrativos de APPsanz&ac por perfil de usuario",
+  "scripts": {
+    "setup": "playwright-core install ffmpeg",
+    "record": "node record.mjs"
+  },
+  "dependencies": {
+    "playwright-core": "1.56.1"
+  }
+}
