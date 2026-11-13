@@ -1,27 +1,43 @@
 #!/usr/bin/env bash
 # Se ejecuta EN el servidor de Hostinger (vía SSH) desde GitHub Actions.
-# Variables: APP_DOMAIN (obligatoria), PHP_BIN (por defecto: php), SEED_DEMO (true/false)
+# Variables: APP_DOMAIN (obligatoria), PHP_BIN (por defecto: PHP 8.4 de Hostinger)
+#
+# Estructura (compatible con el paquete de despliegue manual):
+#   ~/domains/<dominio>/public_html/
+#       index.html, assets/, favicon.svg   frontend React
+#       laravel.php, .htaccess             entrada de la API y reglas de reescritura
+#       appsanzac/                         Laravel (bloqueado para la web): .env y storage se conservan
 set -euo pipefail
 
 : "${APP_DOMAIN:?Falta APP_DOMAIN}"
 PHP_BIN="${PHP_BIN:-/opt/alt/php84/usr/bin/php}"
 BASE="$HOME/domains/$APP_DOMAIN"
-APP="$BASE/appsanzac"
 WEB="$BASE/public_html"
+APP="$WEB/appsanzac"
 REL="$BASE/.release"
 
-echo "==> Desplegando en $BASE con $($PHP_BIN -r 'echo PHP_VERSION;')"
-mkdir -p "$APP" "$WEB"
+echo "==> Desplegando en $WEB con PHP $($PHP_BIN -r 'echo PHP_VERSION;')"
+mkdir -p "$WEB"
 
-# ---------- Backend Laravel ----------
+# Migración desde la estructura anterior (Laravel fuera de public_html)
+if [ ! -d "$APP" ] && [ -d "$BASE/appsanzac" ]; then
+  echo "==> Moviendo la instalación existente a public_html/appsanzac"
+  mv "$BASE/appsanzac" "$APP"
+fi
+mkdir -p "$APP"
+
+# ---------- Paquetes ----------
 rm -rf "$REL" && mkdir -p "$REL/backend" "$REL/frontend"
 tar -xzf "$BASE/backend.tar.gz" -C "$REL/backend"
 tar -xzf "$BASE/frontend.tar.gz" -C "$REL/frontend"
 
+# ---------- Backend Laravel (se conservan .env y storage) ----------
 for item in app bootstrap config database resources routes vendor public artisan composer.json composer.lock; do
   rm -rf "${APP:?}/$item"
   mv "$REL/backend/$item" "$APP/$item"
 done
+cp "$REL/frontend/appsanzac.htaccess" "$APP/.htaccess"
+rm -f "$REL/frontend/appsanzac.htaccess"
 
 mkdir -p "$APP"/storage/app/private "$APP"/storage/app/public "$APP"/storage/fonts \
          "$APP"/storage/framework/{cache/data,sessions,views,testing} "$APP"/storage/logs "$APP"/bootstrap/cache
@@ -43,10 +59,15 @@ if [ -z "$KEY" ]; then "$PHP_BIN" artisan key:generate --force; fi
 
 "$PHP_BIN" artisan migrate --force
 
-# Carga inicial (roles, plan contable y, si SEED_DEMO=true, datos de demostración) una sola vez
+# Carga inicial solo si la base está vacía (p. ej. no se importó el SQL del paquete manual)
 if [ ! -f storage/app/.seeded ]; then
-  echo "==> Carga inicial de datos"
-  "$PHP_BIN" artisan db:seed --force
+  USERS="$("$PHP_BIN" artisan tinker --execute='echo \App\Models\User::count();' 2>/dev/null | tail -n1 | tr -dc '0-9')"
+  if [ "${USERS:-0}" = "0" ]; then
+    echo "==> Base vacía: carga inicial de datos"
+    "$PHP_BIN" artisan db:seed --force
+  else
+    echo "==> La base ya tiene $USERS usuarios: se omite la carga inicial"
+  fi
   touch storage/app/.seeded
 fi
 

@@ -1,12 +1,12 @@
 <?php
 
 /**
- * Punto de entrada de Laravel para Hostinger (hosting compartido, todo en un dominio).
+ * Punto de entrada de la API Laravel (todo dentro de public_html).
  *
- * public_html/            -> frontend React (index.html, assets/) + este archivo + .htaccess
- * ../appsanzac/           -> aplicación Laravel (fuera de la carpeta pública)
- *
- * El .htaccess envía /api/* y /up a este archivo; el resto lo atiende la SPA.
+ * public_html/
+ *   index.html, assets/   -> frontend React
+ *   laravel.php           -> este archivo (recibe /api/* desde .htaccess)
+ *   appsanzac/            -> aplicación Laravel (bloqueada para acceso web)
  */
 
 use Illuminate\Foundation\Application;
@@ -14,7 +14,7 @@ use Illuminate\Http\Request;
 
 define('LARAVEL_START', microtime(true));
 
-$appPath = dirname(__DIR__).'/appsanzac';
+$appPath = __DIR__.'/appsanzac';
 
 if (file_exists($maintenance = $appPath.'/storage/framework/maintenance.php')) {
     require $maintenance;

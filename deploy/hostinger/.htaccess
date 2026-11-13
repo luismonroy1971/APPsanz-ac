@@ -1,4 +1,4 @@
-# APPsanz&ac - Hostinger (todo en un dominio)
+# APPsanz&ac - Hostinger (todo dentro de public_html)
 Options -Indexes -MultiViews
 
 <IfModule mod_rewrite.c>
@@ -8,6 +8,10 @@ Options -Indexes -MultiViews
     RewriteCond %{HTTPS} !=on
     RewriteCond %{HTTP:X-Forwarded-Proto} !=https
     RewriteRule ^ https://%{HTTP_HOST}%{REQUEST_URI} [L,R=301]
+
+    # Bloquear acceso web a la aplicación Laravel (.env, storage, vendor...)
+    RewriteRule ^appsanzac(/|$) - [F,L]
+    RewriteRule (^|/)\.env - [F,L]
 
     # Pasar el token Bearer a PHP
     RewriteCond %{HTTP:Authorization} .
@@ -27,7 +31,6 @@ Options -Indexes -MultiViews
     RewriteRule ^ index.html [L]
 </IfModule>
 
-# Caché larga para assets con hash; index.html sin caché
 <IfModule mod_headers.c>
     <FilesMatch "\.(js|css|woff2?|svg|png|jpg|webp)$">
         Header set Cache-Control "public, max-age=31536000, immutable"
@@ -40,7 +43,6 @@ Options -Indexes -MultiViews
     Header always set Referrer-Policy "strict-origin-when-cross-origin"
 </IfModule>
 
-# Subida de documentos (máx. 20 MB por archivo, varios por envío)
 <IfModule mod_php.c>
     php_value upload_max_filesize 25M
     php_value post_max_size 120M

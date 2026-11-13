@@ -5,12 +5,18 @@ Cada **push a `main`** ejecuta las pruebas, compila el frontend, empaqueta Larav
 ## Estructura en el servidor
 
 ```
-~/domains/TU-DOMINIO/
-├── appsanzac/        Laravel (fuera de la carpeta pública: código, vendor, storage, .env)
-└── public_html/      Frontend React + laravel.php + .htaccess
-                      /api/* y /up  -> laravel.php -> Laravel
-                      todo lo demás -> index.html (SPA)
+~/domains/TU-DOMINIO/public_html/
+├── index.html, assets/, favicon.svg   Frontend React
+├── laravel.php                        Entrada de la API (/api/* y /up)
+├── .htaccess                          Reescritura + bloqueo de /appsanzac y .env
+└── appsanzac/                         Laravel (bloqueado para la web): código, vendor, storage, .env
 ```
+
+Esta estructura es **la misma que usa el paquete de despliegue manual**, así que los dos métodos pueden convivir:
+
+- **Automático (GitHub Actions)**: reemplaza el código y conserva `appsanzac/.env`, `appsanzac/storage` (documentos subidos) y el `APP_KEY`.
+- **Manual (Administrador de archivos)**: se sube y se extrae el zip en `public_html` y se importa el SQL en phpMyAdmin. El siguiente push vuelve a actualizar el código sobre esa misma instalación.
+- La carga inicial de datos solo corre si la base está vacía, así que nunca duplica registros, venga la base de un despliegue automático o del SQL manual.
 
 ## 1. Hostinger (hPanel)
 
@@ -55,7 +61,7 @@ Cada **push a `main`** ejecuta las pruebas, compila el frontend, empaqueta Larav
    - Sube los paquetes por `scp` y ejecuta `deploy/hostinger/remote-deploy.sh` en el servidor, que hace:
      - poner el sitio en mantenimiento (`down`);
      - `migrate --force`;
-     - la carga inicial de datos, **solo la primera vez**;
+     - la carga inicial de datos, **solo si la base está vacía**;
      - `config:cache`, `route:cache` y `view:cache`;
      - volver a poner el sitio en línea (`up`);
      - copiar el frontend a `public_html`.
@@ -63,7 +69,7 @@ Cada **push a `main`** ejecuta las pruebas, compila el frontend, empaqueta Larav
 
 ## Notas
 
-- Los documentos subidos y el `.env` viven en `~/domains/TU-DOMINIO/appsanzac`. Ningún despliegue los borra.
-- Para repetir la carga inicial, borre `appsanzac/storage/app/.seeded` en el servidor. Ojo: si la base ya tiene datos, esto duplica registros.
+- Los documentos subidos y el `.env` viven en `public_html/appsanzac` (bloqueado para la web). Ningún despliegue los borra.
+- Instalaciones anteriores con Laravel fuera de `public_html` se mueven solas a `public_html/appsanzac` en el siguiente despliegue.
 - Si usó datos demo, la clave de todos los usuarios es `Demo2026!`. Cámbiela antes de entregar el sistema.
-- Errores de la aplicación: `appsanzac/storage/logs/laravel-AAAA-MM-DD.log`.
+- Errores de la aplicación: `public_html/appsanzac/storage/logs/laravel-AAAA-MM-DD.log`.

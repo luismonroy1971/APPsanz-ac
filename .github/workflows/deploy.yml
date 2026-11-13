@@ -116,7 +116,7 @@ jobs:
         run: |
           npm ci
           npm run build
-          cp ../deploy/hostinger/.htaccess ../deploy/hostinger/laravel.php dist/
+          cp ../deploy/hostinger/.htaccess ../deploy/hostinger/laravel.php ../deploy/hostinger/appsanzac.htaccess dist/
           tar -czf ../frontend.tar.gz -C dist .
 
       - name: Generar .env de producción
